@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FRR</title>
+<style>
+  body {
+    background-color: #0c0c0c;
+    color: #cccccc;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    padding: 20px;
+    margin: 0;
+    height: 100vh;
+    box-sizing: border-box;
+    transition: background-color 0.05s;
+  }
+  body.flash-red {
+    background-color: #cc0000 !important;
+  }
+  body.drag-over {
+    outline: 3px dashed #ff3333;
+    outline-offset: -10px;
+    background-color: #1a0505;
+  }
+  #terminal {
+    white-space: pre-wrap;
+    line-height: 1.4;
+  }
+  .bold-red {
+    color: #ff3333;
+    font-weight: bold;
+  }
+  .highlight {
+    color: #4af626;
+  }
+  .input-line {
+    display: flex;
+    align-items: center;
+  }
+  input[type="text"] {
+    background: transparent;
+    border: none;
+    color: #cccccc;
+    font-family: inherit;
+    font-size: inherit;
+    outline: none;
+    flex: 1;
+    margin-left: 8px;
+  }
+</style>
+</head>
+<body>
+
+<div id="terminal"></div>
+<div class="input-line" id="prompt-line">
+  <span>FRR@death:~$</span>
+  <input type="text" id="cmd" autofocus autocomplete="off" spellcheck="false" placeholder="Drop a file here or type: upload" />
+</div>
+<input type="file" id="file-picker" style="display: none;" />
+
+<script>
+  const term = document.getElementById('terminal');
+  const promptLine = document.getElementById('prompt-line');
+  const cmdInput = document.getElementById('cmd');
+  const filePicker = document.getElementById('file-picker');
+
+  const loadedFiles = {
+    'target.txt': {
+      data: new TextEncoder().encode('Default dummy file').buffer,
+      type: 'text/plain',
+      handle: null
+    }
+  };
+
+  let gameRunning = false;
+  let aborted = false;
+  let waitingForKey = false;
+  let keyResolver = null;
+
+  const sleep = (ms) => new Promise(resolve => {
+    const id = setTimeout(resolve, ms);
+    const checkAbort = setInterval(() => {
+      if (aborted) {
+        clearTimeout(id);
+        clearInterval(checkAbort);
+        resolve();
+      }
+    }, 50);
+  });
+
+  function print(text = '', isHtml = false) {
+    const div = document.createElement('div');
+    if (isHtml) div.innerHTML = text;
+    else div.textContent = text;
+    term.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  function clearScreen() {
+    term.innerHTML = '';
+  }
+
+  async function loadUploadedFile(file, handle = null) {
+    const buffer = await file.arrayBuffer();
+    const safeName = file.name.replace(/\s+/g, '_');
+    loadedFiles[safeName] = {
+      data: buffer,
+      type: file.type || 'application/octet-stream',
+      handle: handle
+    };
+    const modeTag = handle ? '<span class="bold-red">[LIVE DISK LINKED]</span>' : '<span class="highlight">[LOADED IN MEMORY]</span>';
+    print(`Loaded file: ${safeName} (${file.size} bytes) ${modeTag}`, true);
+    print(`Run "./FRR ${safeName}" to begin.\n`);
+  }
+
+  document.body.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!gameRunning) document.body.classList.add('drag-over');
+  });
+
+  document.body.addEventListener('dragleave', () => {
+    document.body.classList.remove('drag-over');
+  });
+
+  document.body.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    document.body.classList.remove('drag-over');
+    if (gameRunning) return;
+
+    if (e.dataTransfer.files.length > 0) {
+      for (const file of e.dataTransfer.files) {
+        await loadUploadedFile(file, null);
+      }
+    }
+  });
+
+  filePicker.addEventListener('change', async (e) => {
+    if (e.target.files.length > 0) {
+      await loadUploadedFile(e.target.files[0], null);
+      filePicker.value = '';
+    }
+  });
+
+  async function quitGame() {
+    if (!gameRunning || aborted) return;
+    aborted = true;
+    if (keyResolver) keyResolver();
+
+    print('');
+    print('Oh...');
+    await new Promise(r => setTimeout(r, 2500));
+    print("You don't want to play with me?");
+    await new Promise(r => setTimeout(r, 2500));
+    print('Well bear the pain...');
+    
+    document.body.classList.add('flash-red');
+    clearScreen();
+    await new Promise(r => setTimeout(r, 150));
+    document.body.classList.remove('flash-red');
+    clearScreen();
+
+    print('<span class="bold-red">Warning:</span> Something is watching you...', true);
+    print('Never look away...');
+    endGame();
+  }
+
+  function endGame() {
+    gameRunning = false;
+    waitingForKey = false;
+    promptLine.style.display = 'flex';
+    cmdInput.value = '';
+    cmdInput.focus();
+  }
+
+  function waitForAnyKey() {
+    waitingForKey = true;
+    return new Promise(resolve => {
+      keyResolver = () => {
+        waitingForKey = false;
+        resolve();
+      };
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (gameRunning && e.ctrlKey && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      quitGame();
+      return;
+    }
+    if (waitingForKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      if (keyResolver) keyResolver();
+    }
+  });
+
+  cmdInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const raw = cmdInput.value.trim();
+      print(`FRR@death:~$ ${raw}`);
+      if (raw) parseCommand(raw);
+      cmdInput.value = '';
+    }
+  });
+
+  async function parseCommand(raw) {
+    const parts = raw.split(/\s+/);
+    const cmd = parts[0];
+
+    if (cmd === 'ls') {
+      const list = ['FRR', ...Object.keys(loadedFiles)];
+      print(list.join('  '));
+    } else if (cmd === 'upload') {
+      filePicker.click();
+    } else if (cmd === 'load-real') {
+      if ('showOpenFilePicker' in window) {
+        try {
+          const [handle] = await window.showOpenFilePicker();
+          const file = await handle.getFile();
+          await loadUploadedFile(file, handle);
+        } catch (err) {
+          print('Selection cancelled.');
+        }
+      } else {
+        print('Your browser does not support direct disk access. Use "upload" or drag-and-drop instead.');
+      }
+    } else if (cmd === 'download' && parts[1]) {
+      const target = parts[1];
+      if (loadedFiles[target]) {
+        const blob = new Blob([loadedFiles[target].data], { type: loadedFiles[target].type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = target;
+        a.click();
+        URL.revokeObjectURL(url);
+        print(`Downloaded surviving file: ${target}`);
+      } else {
+        print(`File ${target} not found.`);
+      }
+    } else if (cmd === 'clear') {
+      clearScreen();
+    } else if (cmd === './FRR' || (cmd === 'bash' && parts[1] === 'FRR')) {
+      const args = cmd === 'bash' ? parts.slice(2) : parts.slice(1);
+      startGame(args);
+    } else {
+      print(`bash: ${cmd}: command not found`);
+      print('Commands: upload, load-real, ls, download <file>, ./FRR <file>, clear');
+    }
+  }
+
+  async function startGame(args) {
+    promptLine.style.display = 'none';
+    gameRunning = true;
+    aborted = false;
+
+    print(`Number of arguments: ${args.length}`);
+    if (args.length !== 1) {
+      print('We need a file to kill!');
+      return endGame();
+    }
+
+    const target = args[0];
+    if (target in loadedFiles) {
+      print(`File ${target} loaded.`);
+    } else {
+      print(`${target} doesn't exist!`);
+      return endGame();
+    }
+
+    await sleep(5000);
+    if (aborted) return;
+    print("Welcome to the most dangerest game you'll ever play...");
+
+    print('Loading...');
+    const bullet = Math.floor(Math.random() * 6) + 1;
+    await sleep(2500);
+    if (aborted) return;
+
+    print('Spinning cylinder...');
+    let cylinder = Math.floor(Math.random() * 6) + 1;
+    await sleep(1500);
+    if (aborted) return;
+
+    let blams = 0;
+    while (blams < 1 && !aborted) {
+      print('Press any to do it...\n        or press CTRL + C to stop the pain...');
+      await sleep(5000);
+      if (aborted) return;
+
+      await waitForAnyKey();
+      if (aborted) return;
+
+      if (cylinder === bullet) {
+        print(`Bullet is in chamber ${bullet}.`);
+        print(`Cylinder is in position ${cylinder}.`);
+        print('BLAM!');
+        print(`${target}'s bits were exterminated from this multiverse...`);
+        blams++;
+
+        const victim = loadedFiles[target];
+        if (victim.handle && victim.handle.remove) {
+          try {
+            await victim.handle.remove();
+            print('<span class="bold-red">[REAL FILE PERMANENTLY DELETED FROM DISK]</span>', true);
+          } catch (err) {
+            const writable = await victim.handle.createWritable();
+            await writable.write(new Uint8Array(0));
+            await writable.close();
+            print('<span class="bold-red">[REAL FILE WIPED TO 0 BYTES ON DISK]</span>', true);
+          }
+        }
+        new Uint8Array(victim.data).fill(0);
+        delete loadedFiles[target];
+
+        await sleep(2500);
+        if (aborted) return;
+      } else {
+        print(`Click...\n              ${target} has contained most bits...and lives another cycle.`);
+        print(`Cylinder is in position ${cylinder}`);
+      }
+
+      cylinder = (cylinder % 6) + 1;
+    }
+
+    await sleep(5000);
+    if (aborted) return;
+    print('Thanks for playing...or not...');
+    endGame();
+  }
+
+  document.addEventListener('click', () => {
+    if (!gameRunning) cmdInput.focus();
+  });
+
+  print('=== FILE RUSSIAN ROULETTE ===');
+  print('1. Drag & drop any file onto this window, or type "upload"');
+  print('2. Type "load-real" (Chrome/Edge) to link a real file on your hard drive');
+  print('3. Type "./FRR <filename>" to play\n');
+</script>
+</body>
+</html>
